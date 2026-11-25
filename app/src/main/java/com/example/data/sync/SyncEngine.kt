@@ -640,7 +640,10 @@ class SyncEngine(
           }
           val bootstrap = bootstrapQuery.get().await()
           val bootstrapDocs = bootstrap.documents
-          if (bootstrapDocs.isNotEmpty()) onDocuments(bootstrapDocs)
+          if (bootstrapDocs.isNotEmpty()) {
+            onDocuments(bootstrapDocs)
+            recordSessionReads(collection, bootstrapDocs.size)
+          }
           persistCollectionCursor(device.deviceId, collection, maxUpdatedAt(bootstrapDocs, 0L))
         }
 
@@ -1504,7 +1507,7 @@ class SyncEngine(
   }
 
   private fun maxUpdatedAt(documents: List<DocumentSnapshot>, fallback: Long): Long =
-    documents.mapNotNull { it.getTimestamp("updatedAt")?.toDate()?.time }.maxOrNull() ?: maxOf(fallback, System.currentTimeMillis())
+    documents.mapNotNull { it.getTimestamp("updatedAt")?.toDate()?.time }.maxOrNull() ?: fallback
 
   private fun recordSessionReads(collection: String, count: Int) {
     if (count <= 0) return
@@ -1513,6 +1516,7 @@ class SyncEngine(
   }
 
   private suspend fun persistCollectionCursor(deviceId: String, collection: String, cursor: Long) {
+    database.withTransaction {
     val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
     val updated = when (collection) {
       "customers" -> current.copy(customersLastPulledAt = maxOf(current.customersLastPulledAt, cursor))
