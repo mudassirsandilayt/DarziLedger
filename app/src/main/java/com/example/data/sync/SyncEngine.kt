@@ -64,6 +64,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -136,8 +137,7 @@ class SyncEngine(
 
     val listenersStarted = AtomicBoolean(false)
 
-    // Run pending outbox push & reservation check cleanly BEFORE opening the 5 full-collection
-    // snapshot streams so initial Firestore queries/transactions are never starved behind bulk downloads.
+    // Flush pending local writes before attaching the incremental Firestore listeners.
     combine(
       connectivityMonitor.isOnline,
       deviceSyncRepository.observeDeviceConfig(),
@@ -1516,8 +1516,9 @@ class SyncEngine(
 
   private fun recordSessionReads(collection: String, count: Int) {
     if (count <= 0) return
-    _sessionReadCounts.value = _sessionReadCounts.value +
-      (collection to ((_sessionReadCounts.value[collection] ?: 0) + count))
+    _sessionReadCounts.update { current ->
+      current + (collection to ((current[collection] ?: 0) + count))
+    }
   }
 
   private suspend fun persistCollectionCursor(deviceId: String, collection: String, cursor: Long) {
