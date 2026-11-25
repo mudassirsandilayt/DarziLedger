@@ -43,7 +43,7 @@ import com.example.data.local.entities.SyncOutboxEntity
     SyncConflictEntity::class,
     OrderSyncLogEntity::class,
   ],
-  version = 8,
+  version = 9,
   exportSchema = true,
 )
 @TypeConverters(DarziConverters::class)
@@ -225,6 +225,16 @@ abstract class DarziDatabase : RoomDatabase() {
       }
     }
 
+    val MIGRATION_8_9: Migration = object : Migration(8, 9) {
+      override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `sync_metadata` ADD COLUMN `customersLastPulledAt` INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `sync_metadata` ADD COLUMN `measurementsLastPulledAt` INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `sync_metadata` ADD COLUMN `ordersLastPulledAt` INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `sync_metadata` ADD COLUMN `paymentsLastPulledAt` INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `sync_metadata` ADD COLUMN `reservationsLastPulledAt` INTEGER NOT NULL DEFAULT 0")
+      }
+    }
+
     @Volatile
     private var INSTANCE: DarziDatabase? = null
 
@@ -243,6 +253,7 @@ abstract class DarziDatabase : RoomDatabase() {
             MIGRATION_5_6,
             MIGRATION_6_7,
             MIGRATION_7_8,
+            MIGRATION_8_9,
           )
           .build()
           .also { INSTANCE = it }

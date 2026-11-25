@@ -1,6 +1,9 @@
 package com.example.app
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import com.example.R
 import com.example.core.preferences.DataStoreShopPreferencesRepository
 import com.example.core.preferences.ShopPreferencesRepository
@@ -35,6 +38,7 @@ interface AppContainer {
   val shopCloudRepository: ShopCloudRepository
   val connectivityMonitor: ConnectivityMonitor
   val syncEngine: SyncEngine
+  val applicationScope: CoroutineScope
   val thermalPrinterClient: ThermalPrinterClient
   val thermalPrintManager: ThermalPrintManager
   val orderMediaStore: OrderMediaStore
@@ -49,6 +53,7 @@ class DefaultAppContainer(
   shopPreferencesRepositoryOverride: ShopPreferencesRepository? = null,
   shopCloudRepositoryOverride: ShopCloudRepository? = null,
 ) : AppContainer {
+  override val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   override val database: DarziDatabase by lazy {
     DarziDatabase.getInstance(applicationContext)
   }
@@ -114,6 +119,7 @@ class DefaultAppContainer(
       deviceSyncRepository = deviceSyncRepository,
       shopRepository = shopRepository,
       orderRepository = orderRepository,
+      applicationScope = applicationScope,
     )
   }
 

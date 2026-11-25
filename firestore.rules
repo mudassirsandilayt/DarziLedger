@@ -256,7 +256,9 @@ service cloud.firestore {
              data.note is string && data.note.size() <= 300 &&
              isValidId(data.deviceId) &&
              data.createdAtEpochMillis is int && data.createdAtEpochMillis >= 0 &&
-             data.createdAt is timestamp && data.createdAt <= request.time;
+             data.updatedAtEpochMillis is int && data.updatedAtEpochMillis >= 0 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
     match /staff_links/{staffUid} {
@@ -598,11 +600,11 @@ service cloud.firestore {
                          isValidId(paymentId) &&
                          incoming().keys().hasAll([
                            'ownerUid', 'orderId', 'amountPkr', 'paymentMethod', 'note',
-                           'deviceId', 'createdAtEpochMillis', 'createdAt'
+                           'deviceId', 'createdAtEpochMillis', 'updatedAtEpochMillis', 'createdAt', 'updatedAt'
                          ]) &&
                          incoming().keys().hasOnly([
                            'ownerUid', 'orderId', 'amountPkr', 'paymentMethod', 'note',
-                           'deviceId', 'createdAtEpochMillis', 'createdAt'
+                           'deviceId', 'createdAtEpochMillis', 'updatedAtEpochMillis', 'createdAt', 'updatedAt'
                          ]) &&
                          isValidPayment(incoming(), userId) &&
                          exists(/databases/$(database)/documents/shops/$(userId)/orders/$(incoming().orderId)) &&

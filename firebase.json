@@ -2,7 +2,8 @@
   "firestore": [
     {
       "database": "ai-studio-android-darzilad-60cb06a2-31ab-469d-9ba9-5f78fdfa53cb",
-      "rules": "firestore.rules"
+      "rules": "firestore.rules",
+      "indexes": "firestore.indexes.json"
     }
   ],
   "emulators": {

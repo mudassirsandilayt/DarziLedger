@@ -72,6 +72,7 @@ fun SyncStatusScreen(
   val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
   val syncState by viewModel.syncState.collectAsStateWithLifecycle()
   val lastSyncError by viewModel.lastSyncError.collectAsStateWithLifecycle()
+  val sessionReadCounts by viewModel.sessionReadCounts.collectAsStateWithLifecycle()
   val pendingCount by viewModel.pendingOutboxCount.collectAsStateWithLifecycle()
   val failedCount by viewModel.failedOutboxCount.collectAsStateWithLifecycle()
   val orderSyncLogs by viewModel.orderSyncLogs.collectAsStateWithLifecycle()
@@ -214,6 +215,22 @@ fun SyncStatusScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
               )
+
+              if (sessionReadCounts.isNotEmpty()) {
+                Text(
+                  text = "Firestore document changes this session",
+                  style = MaterialTheme.typography.titleSmall,
+                )
+                sessionReadCounts.toSortedMap().forEach { (collection, count) ->
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                  ) {
+                    Text(collection, style = MaterialTheme.typography.bodySmall)
+                    Text(count.toString(), style = MaterialTheme.typography.bodySmall)
+                  }
+                }
+              }
 
               val errorText = lastSyncError ?: metadata?.lastError
               if (!errorText.isNullOrBlank()) {

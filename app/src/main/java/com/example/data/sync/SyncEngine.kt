@@ -36,8 +36,10 @@ import com.example.data.sync.SyncMappers.toLocalEntity
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.snapshots
+import java.util.Date
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -55,12 +57,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -85,6 +89,7 @@ class SyncEngine(
   private val deviceSyncRepository: DeviceSyncRepository,
   private val shopRepository: ShopRepository,
   private val orderRepository: OrderRepository,
+  private val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
   private val customerDao = database.customerDao()
   private val measurementDao = database.measurementDao()
@@ -93,6 +98,9 @@ class SyncEngine(
   private val outboxDao = database.syncOutboxDao()
   private val orderSyncLogDao = database.orderSyncLogDao()
   private val remoteApplier = SyncRemoteApplier(database)
+
+  private val _sessionReadCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+  val sessionReadCounts: StateFlow<Map<String, Int>> = _sessionReadCounts.asStateFlow()
 
   private val json = Json {
     ignoreUnknownKeys = true
@@ -113,6 +121,10 @@ class SyncEngine(
   private val _lastError = MutableStateFlow<String?>(null)
   val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
+  fun startRealtimeSync(shopId: String) {
+    startRealtimeSync(shopId, applicationScope)
+  }
+
   fun startRealtimeSync(shopId: String, scope: CoroutineScope) {
     if (shopId.isBlank()) return
     if (activeShopId == shopId && activeSyncJob?.isActive == true) return
@@ -125,8 +137,7 @@ class SyncEngine(
 
     val listenersStarted = AtomicBoolean(false)
 
-    // Run pending outbox push & reservation check cleanly BEFORE opening the 5 full-collection
-    // snapshot streams so initial Firestore queries/transactions are never starved behind bulk downloads.
+    // Flush pending local writes before attaching the incremental Firestore listeners.
     combine(
       connectivityMonitor.isOnline,
       deviceSyncRepository.observeDeviceConfig(),
@@ -608,34 +619,87 @@ class SyncEngine(
     onDocuments: suspend (List<DocumentSnapshot>) -> Unit,
   ) {
     val path = "shops/$shopId/$collection"
-    var initialProcessed = false
-    db.collection("shops").document(shopId).collection(collection)
-      .snapshots()
-      .onEach { snap ->
-        val docs = if (!initialProcessed) {
-          initialProcessed = true
-          snap.documents
-        } else {
-          snap.documentChanges
-            .filter { it.type != DocumentChange.Type.REMOVED }
-            .map { it.document }
+    ioScope.launch {
+      try {
+        val device = deviceSyncDao.getDeviceConfig() ?: return@launch
+        val metadata = deviceSyncDao.getSyncMetadata(device.deviceId) ?: SyncMetadataEntity(deviceId = device.deviceId)
+        val cursor = when (collection) {
+          "customers" -> metadata.customersLastPulledAt
+          "measurements" -> metadata.measurementsLastPulledAt
+          "orders" -> metadata.ordersLastPulledAt
+          "payments" -> metadata.paymentsLastPulledAt
+          "order_reservations" -> metadata.reservationsLastPulledAt
+          else -> 0L
         }
-        if (docs.isNotEmpty()) {
-          onDocuments(docs)
+        val collectionRef = db.collection("shops").document(shopId).collection(collection)
+
+        // A one-time bootstrap handles existing documents (including legacy docs without updatedAt).
+        if (cursor == 0L) {
+          var bootstrapQuery: com.google.firebase.firestore.Query = collectionRef
+          if (collection == "order_reservations") {
+            bootstrapQuery = bootstrapQuery.whereEqualTo("deviceId", device.deviceId)
+          }
+          val bootstrap = bootstrapQuery.get().await()
+          val bootstrapDocs = bootstrap.documents
+          if (bootstrapDocs.isNotEmpty()) {
+            onDocuments(bootstrapDocs)
+            recordSessionReads(collection, bootstrapDocs.size)
+          }
+          persistCollectionCursor(device.deviceId, collection, maxUpdatedAt(bootstrapDocs, 0L))
         }
-      }
-      .flowOn(Dispatchers.IO)
-      .catch { error ->
-        val firestoreError = generateSequence(error) { it.cause }
-          .filterIsInstance<FirebaseFirestoreException>()
-          .firstOrNull()
-        if (firestoreError == null && error is CancellationException) throw error
-        val rootError = firestoreError ?: error
+
+        val refreshed = deviceSyncDao.getSyncMetadata(device.deviceId) ?: metadata
+        val savedCursor = when (collection) {
+          "customers" -> refreshed.customersLastPulledAt
+          "measurements" -> refreshed.measurementsLastPulledAt
+          "orders" -> refreshed.ordersLastPulledAt
+          "payments" -> refreshed.paymentsLastPulledAt
+          "order_reservations" -> refreshed.reservationsLastPulledAt
+          else -> 0L
+        }
+        var query: com.google.firebase.firestore.Query = collectionRef.whereGreaterThan(
+          "updatedAt",
+          Timestamp(Date((savedCursor - SYNC_CURSOR_OVERLAP_MS).coerceAtLeast(0L))),
+        )
+        if (collection == "order_reservations") {
+          query = collectionRef.whereEqualTo("deviceId", device.deviceId).whereGreaterThan(
+            "updatedAt",
+            Timestamp(Date((savedCursor - SYNC_CURSOR_OVERLAP_MS).coerceAtLeast(0L))),
+          )
+        }
+
+        query.snapshots()
+          .onEach { snap ->
+            if (snap.metadata.isFromCache) return@onEach
+            val docs = snap.documentChanges
+              .filter { it.type != DocumentChange.Type.REMOVED }
+              .map { it.document }
+            if (docs.isNotEmpty()) {
+              onDocuments(docs)
+              recordSessionReads(collection, docs.size)
+              persistCollectionCursor(device.deviceId, collection, maxUpdatedAt(docs, savedCursor))
+            }
+          }
+          .flowOn(Dispatchers.IO)
+          .catch { error ->
+            val firestoreError = generateSequence(error) { it.cause }
+              .filterIsInstance<FirebaseFirestoreException>()
+              .firstOrNull()
+            if (firestoreError == null && error is CancellationException) throw error
+            val rootError = firestoreError ?: error
+            if (authSessionProvider.currentUser != null) {
+              handleFirestoreError(rootError, OperationType.LIST, path)
+            }
+          }
+          .collect { }
+      } catch (error: CancellationException) {
+        throw error
+      } catch (error: Exception) {
         if (authSessionProvider.currentUser != null) {
-          handleFirestoreError(rootError, OperationType.LIST, path)
+          handleFirestoreError(error, OperationType.LIST, path)
         }
       }
-      .launchIn(ioScope)
+    }
   }
 
   private suspend fun fetchMissingCustomers(
@@ -652,6 +716,7 @@ class SyncEngine(
               val snap = db.collection("shops").document(remoteShopId)
                 .collection("customers").document(id).get().await()
               if (snap.exists()) {
+                recordSessionReads("customers", 1)
                 snap.toObject(CustomerDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                   ?.toLocalEntity(localShopId)
               } else {
@@ -678,6 +743,7 @@ class SyncEngine(
               val snap = db.collection("shops").document(remoteShopId)
                 .collection("orders").document(id).get().await()
               if (snap.exists()) {
+                recordSessionReads("orders", 1)
                 snap.toObject(OrderDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                   ?.toLocalEntity(localShopId)
               } else {
@@ -716,6 +782,7 @@ class SyncEngine(
         .get()
         .await()
     }
+    recordSessionReads("order_reservations", remoteResSnap.size())
     val remoteList = remoteResSnap.toObjects(
       OrderReservationDoc::class.java,
       DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
@@ -1386,60 +1453,89 @@ class SyncEngine(
   private suspend fun pullAllRemoteCollections(uid: String, localDeviceId: String): Int {
     val shopId = shopRepository.ensureDefaultShop().shopId
     val shopDocRef = db.collection("shops").document(uid)
+    val device = deviceSyncDao.getDeviceConfig() ?: return 0
+    val metadata = deviceSyncDao.getSyncMetadata(device.deviceId) ?: SyncMetadataEntity(deviceId = device.deviceId)
 
-    val (custSnap, measSnap, orderSnap, paySnap, resSnap) = withTimeout(PULL_TIMEOUT_MS) {
-      coroutineScope {
-        val custDeferred = async { shopDocRef.collection("customers").get().await() }
-        val measDeferred = async { shopDocRef.collection("measurements").get().await() }
-        val orderDeferred = async { shopDocRef.collection("orders").get().await() }
-        val payDeferred = async { shopDocRef.collection("payments").get().await() }
-        val resDeferred = async {
-          shopDocRef.collection("order_reservations")
-            .whereEqualTo("deviceId", localDeviceId)
-            .get()
-            .await()
-        }
-        PullSnapshots(
-          custSnap = custDeferred.await(),
-          measSnap = measDeferred.await(),
-          orderSnap = orderDeferred.await(),
-          paySnap = payDeferred.await(),
-          resSnap = resDeferred.await(),
-        )
+    suspend fun queryCollection(name: String, cursor: Long, deviceScoped: Boolean = false): com.google.firebase.firestore.QuerySnapshot {
+      var query: com.google.firebase.firestore.Query = shopDocRef.collection(name)
+      if (deviceScoped) query = query.whereEqualTo("deviceId", localDeviceId)
+      if (cursor > 0L) {
+        query = query.whereGreaterThan("updatedAt", Timestamp(Date((cursor - SYNC_CURSOR_OVERLAP_MS).coerceAtLeast(0L))))
       }
+      return query.get().await()
     }
 
     var totalPulled = 0
-    totalPulled += remoteApplier.applyRemoteCustomers(
-      custSnap.toObjects(CustomerDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-        .map { it.toLocalEntity(shopId) },
-    )
-    totalPulled += remoteApplier.applyRemoteMeasurements(
-      measSnap.toObjects(MeasurementDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-        .map { it.toLocalEntity() },
-    )
-    totalPulled += remoteApplier.applyRemoteOrders(
-      orderSnap.toObjects(OrderDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-        .map { it.toLocalEntity(shopId) },
-    )
-    totalPulled += remoteApplier.applyRemotePayments(
-      paySnap.toObjects(PaymentDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-        .map { it.toLocalEntity() },
-    )
-    remoteApplier.applyRemoteReservations(
-      resSnap.toObjects(OrderReservationDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-        .map { it.toLocalEntity() },
-    )
+    withTimeout(PULL_TIMEOUT_MS) {
+      val custSnap = queryCollection("customers", metadata.customersLastPulledAt)
+      recordSessionReads("customers", custSnap.size())
+      val customers = custSnap.documents.mapNotNull { it.toObject(CustomerDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity(shopId) }
+      totalPulled += remoteApplier.applyRemoteCustomers(customers)
+      persistCollectionCursor(device.deviceId, "customers", maxUpdatedAt(custSnap.documents, metadata.customersLastPulledAt))
+
+      val measSnap = queryCollection("measurements", metadata.measurementsLastPulledAt)
+      recordSessionReads("measurements", measSnap.size())
+      val measurements = measSnap.documents.mapNotNull { it.toObject(MeasurementDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity() }
+      totalPulled += remoteApplier.applyRemoteMeasurements(
+        remoteList = measurements,
+        fetchMissingCustomers = { ids -> fetchMissingCustomers(uid, shopId, ids) },
+      )
+      persistCollectionCursor(device.deviceId, "measurements", maxUpdatedAt(measSnap.documents, metadata.measurementsLastPulledAt))
+
+      val orderSnap = queryCollection("orders", metadata.ordersLastPulledAt)
+      recordSessionReads("orders", orderSnap.size())
+      val orders = orderSnap.documents.mapNotNull { it.toObject(OrderDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity(shopId) }
+      totalPulled += remoteApplier.applyRemoteOrders(
+        remoteList = orders,
+        fetchMissingCustomers = { ids -> fetchMissingCustomers(uid, shopId, ids) },
+      )
+      persistCollectionCursor(device.deviceId, "orders", maxUpdatedAt(orderSnap.documents, metadata.ordersLastPulledAt))
+
+      val paymentSnap = queryCollection("payments", metadata.paymentsLastPulledAt)
+      recordSessionReads("payments", paymentSnap.size())
+      val payments = paymentSnap.documents.mapNotNull { it.toObject(PaymentDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity() }
+      totalPulled += remoteApplier.applyRemotePayments(
+        remoteList = payments,
+        fetchMissingOrders = { ids -> fetchMissingOrders(uid, shopId, ids) },
+        fetchMissingCustomers = { ids -> fetchMissingCustomers(uid, shopId, ids) },
+      )
+      persistCollectionCursor(device.deviceId, "payments", maxUpdatedAt(paymentSnap.documents, metadata.paymentsLastPulledAt))
+
+      val reservationSnap = queryCollection("order_reservations", metadata.reservationsLastPulledAt, deviceScoped = true)
+      recordSessionReads("order_reservations", reservationSnap.size())
+      val reservations = reservationSnap.documents.mapNotNull { it.toObject(OrderReservationDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity() }
+      remoteApplier.applyRemoteReservations(reservations)
+      persistCollectionCursor(device.deviceId, "order_reservations", maxUpdatedAt(reservationSnap.documents, metadata.reservationsLastPulledAt))
+    }
     return totalPulled
   }
 
-  private data class PullSnapshots(
-    val custSnap: com.google.firebase.firestore.QuerySnapshot,
-    val measSnap: com.google.firebase.firestore.QuerySnapshot,
-    val orderSnap: com.google.firebase.firestore.QuerySnapshot,
-    val paySnap: com.google.firebase.firestore.QuerySnapshot,
-    val resSnap: com.google.firebase.firestore.QuerySnapshot,
-  )
+  private fun maxUpdatedAt(documents: List<DocumentSnapshot>, fallback: Long): Long =
+    documents.mapNotNull { it.getTimestamp("updatedAt")?.toDate()?.time }.maxOrNull()
+      ?: if (fallback == 0L) (System.currentTimeMillis() - SYNC_CURSOR_OVERLAP_MS).coerceAtLeast(0L) else fallback
+
+  private fun recordSessionReads(collection: String, count: Int) {
+    if (count <= 0) return
+    _sessionReadCounts.update { current ->
+      current + (collection to ((current[collection] ?: 0) + count))
+    }
+  }
+
+  private suspend fun persistCollectionCursor(deviceId: String, collection: String, cursor: Long) {
+    database.withTransaction {
+      val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
+      val updated = when (collection) {
+        "customers" -> current.copy(customersLastPulledAt = maxOf(current.customersLastPulledAt, cursor))
+        "measurements" -> current.copy(measurementsLastPulledAt = maxOf(current.measurementsLastPulledAt, cursor))
+        "orders" -> current.copy(ordersLastPulledAt = maxOf(current.ordersLastPulledAt, cursor))
+        "payments" -> current.copy(paymentsLastPulledAt = maxOf(current.paymentsLastPulledAt, cursor))
+        "order_reservations" -> current.copy(reservationsLastPulledAt = maxOf(current.reservationsLastPulledAt, cursor))
+        else -> current
+      }
+      deviceSyncDao.upsertSyncMetadata(updated)
+    }
+  }
+
 
   private suspend fun updateSyncMetadata(
     deviceId: String,
@@ -1448,15 +1544,17 @@ class SyncEngine(
     successAt: Long? = null,
     error: String? = null,
   ) {
-    val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
-    deviceSyncDao.upsertSyncMetadata(
-      current.copy(
-        syncStatus = state,
-        lastSyncAttemptAt = attemptAt,
-        lastSuccessfulSyncAt = successAt ?: current.lastSuccessfulSyncAt,
-        lastError = error,
-      ),
-    )
+    database.withTransaction {
+      val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
+      deviceSyncDao.upsertSyncMetadata(
+        current.copy(
+          syncStatus = state,
+          lastSyncAttemptAt = attemptAt,
+          lastSuccessfulSyncAt = successAt ?: current.lastSuccessfulSyncAt,
+          lastError = error,
+        ),
+      )
+    }
   }
 
   private fun dependencyPriority(type: SyncEntityType): Int = when (type) {
@@ -1476,6 +1574,7 @@ class SyncEngine(
     const val PULL_TIMEOUT_MS = 120_000L
     const val PARENT_FETCH_TIMEOUT_MS = 15_000L
     const val SNAPSHOT_SYNC_TIMESTAMP_THROTTLE_MS = 15_000L
+    const val SYNC_CURSOR_OVERLAP_MS = 5_000L
     const val OUTBOX_BATCH_FETCH_SIZE = 300
     const val MAX_CONCURRENT_WRITES = 15
   }

@@ -36,6 +36,8 @@ class SyncStatusViewModel(
 
   val lastSyncError: StateFlow<String?> = syncEngine.lastError
 
+  val sessionReadCounts: StateFlow<Map<String, Int>> = syncEngine.sessionReadCounts
+
   val pendingOutboxCount: StateFlow<Int> = deviceSyncRepository.observePendingOutboxCount()
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
