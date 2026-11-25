@@ -690,7 +690,7 @@ class SyncEngine(
               handleFirestoreError(rootError, OperationType.LIST, path)
             }
           }
-          .collect()
+          .collect { }
       } catch (error: CancellationException) {
         throw error
       } catch (error: Exception) {
@@ -1507,7 +1507,8 @@ class SyncEngine(
   }
 
   private fun maxUpdatedAt(documents: List<DocumentSnapshot>, fallback: Long): Long =
-    documents.mapNotNull { it.getTimestamp("updatedAt")?.toDate()?.time }.maxOrNull() ?: fallback
+    documents.mapNotNull { it.getTimestamp("updatedAt")?.toDate()?.time }.maxOrNull()
+      ?: if (fallback == 0L) (System.currentTimeMillis() - SYNC_CURSOR_OVERLAP_MS).coerceAtLeast(0L) else fallback
 
   private fun recordSessionReads(collection: String, count: Int) {
     if (count <= 0) return
