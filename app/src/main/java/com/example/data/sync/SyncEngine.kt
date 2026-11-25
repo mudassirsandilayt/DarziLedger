@@ -95,6 +95,10 @@ class SyncEngine(
   private val outboxDao = database.syncOutboxDao()
   private val orderSyncLogDao = database.orderSyncLogDao()
   private val remoteApplier = SyncRemoteApplier(database)
+  private val fallbackApplicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+  private val _sessionReadCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+  val sessionReadCounts: StateFlow<Map<String, Int>> = _sessionReadCounts.asStateFlow()
 
   private val json = Json {
     ignoreUnknownKeys = true
@@ -114,6 +118,10 @@ class SyncEngine(
 
   private val _lastError = MutableStateFlow<String?>(null)
   val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
+  fun startRealtimeSync(shopId: String) {
+    startRealtimeSync(shopId, fallbackApplicationScope)
+  }
 
   fun startRealtimeSync(shopId: String, scope: CoroutineScope) {
     if (shopId.isBlank()) return
@@ -610,34 +618,86 @@ class SyncEngine(
     onDocuments: suspend (List<DocumentSnapshot>) -> Unit,
   ) {
     val path = "shops/$shopId/$collection"
-    var initialProcessed = false
-    db.collection("shops").document(shopId).collection(collection)
-      .snapshots()
-      .onEach { snap ->
-        val docs = if (!initialProcessed) {
-          initialProcessed = true
-          snap.documents
-        } else {
-          snap.documentChanges
-            .filter { it.type != DocumentChange.Type.REMOVED }
-            .map { it.document }
+    ioScope.launch {
+      try {
+        val device = deviceSyncDao.getDeviceConfig() ?: return@launch
+        val metadata = deviceSyncDao.getSyncMetadata(device.deviceId) ?: SyncMetadataEntity(deviceId = device.deviceId)
+        val cursor = when (collection) {
+          "customers" -> metadata.customersLastPulledAt
+          "measurements" -> metadata.measurementsLastPulledAt
+          "orders" -> metadata.ordersLastPulledAt
+          "payments" -> metadata.paymentsLastPulledAt
+          "order_reservations" -> metadata.reservationsLastPulledAt
+          else -> 0L
         }
-        if (docs.isNotEmpty()) {
-          onDocuments(docs)
+        val collectionRef = db.collection("shops").document(shopId).collection(collection)
+
+        // A one-time bootstrap handles existing documents (including legacy docs without updatedAt).
+        if (cursor == 0L) {
+          var bootstrapQuery: com.google.firebase.firestore.Query = collectionRef
+          if (collection == "order_reservations") {
+            bootstrapQuery = bootstrapQuery.whereEqualTo("deviceId", device.deviceId)
+          }
+          val bootstrap = bootstrapQuery.get().await()
+          val bootstrapDocs = bootstrap.documents
+          if (bootstrapDocs.isNotEmpty()) onDocuments(bootstrapDocs)
+          persistCollectionCursor(device.deviceId, collection, maxUpdatedAt(bootstrapDocs, 0L))
         }
-      }
-      .flowOn(Dispatchers.IO)
-      .catch { error ->
-        val firestoreError = generateSequence(error) { it.cause }
-          .filterIsInstance<FirebaseFirestoreException>()
-          .firstOrNull()
-        if (firestoreError == null && error is CancellationException) throw error
-        val rootError = firestoreError ?: error
+
+        val refreshed = deviceSyncDao.getSyncMetadata(device.deviceId) ?: metadata
+        val savedCursor = when (collection) {
+          "customers" -> refreshed.customersLastPulledAt
+          "measurements" -> refreshed.measurementsLastPulledAt
+          "orders" -> refreshed.ordersLastPulledAt
+          "payments" -> refreshed.paymentsLastPulledAt
+          "order_reservations" -> refreshed.reservationsLastPulledAt
+          else -> 0L
+        }
+        var query: com.google.firebase.firestore.Query = collectionRef.whereGreaterThan(
+          "updatedAt",
+          Timestamp(Date((savedCursor - SYNC_CURSOR_OVERLAP_MS).coerceAtLeast(0L))),
+        )
+        if (collection == "order_reservations") {
+          query = collectionRef.whereEqualTo("deviceId", device.deviceId).whereGreaterThan(
+            "updatedAt",
+            Timestamp(Date((savedCursor - SYNC_CURSOR_OVERLAP_MS).coerceAtLeast(0L))),
+          )
+        }
+
+        query.snapshots()
+          .onEach { snap ->
+            if (snap.metadata.isFromCache) return@onEach
+            val docs = snap.documentChanges
+              .filter { it.type != DocumentChange.Type.REMOVED }
+              .map { it.document }
+            if (docs.isNotEmpty()) {
+              onDocuments(docs)
+              val count = docs.size
+              _sessionReadCounts.value = _sessionReadCounts.value +
+                (collection to ((_sessionReadCounts.value[collection] ?: 0) + count))
+              persistCollectionCursor(device.deviceId, collection, maxUpdatedAt(docs, savedCursor))
+            }
+          }
+          .flowOn(Dispatchers.IO)
+          .catch { error ->
+            val firestoreError = generateSequence(error) { it.cause }
+              .filterIsInstance<FirebaseFirestoreException>()
+              .firstOrNull()
+            if (firestoreError == null && error is CancellationException) throw error
+            val rootError = firestoreError ?: error
+            if (authSessionProvider.currentUser != null) {
+              handleFirestoreError(rootError, OperationType.LIST, path)
+            }
+          }
+          .collect()
+      } catch (error: CancellationException) {
+        throw error
+      } catch (error: Exception) {
         if (authSessionProvider.currentUser != null) {
-          handleFirestoreError(rootError, OperationType.LIST, path)
+          handleFirestoreError(error, OperationType.LIST, path)
         }
       }
-      .launchIn(ioScope)
+    }
   }
 
   private suspend fun fetchMissingCustomers(
