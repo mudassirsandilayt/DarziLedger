@@ -715,6 +715,7 @@ class SyncEngine(
               val snap = db.collection("shops").document(remoteShopId)
                 .collection("customers").document(id).get().await()
               if (snap.exists()) {
+                recordSessionReads("customers", 1)
                 snap.toObject(CustomerDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                   ?.toLocalEntity(localShopId)
               } else {
@@ -741,6 +742,7 @@ class SyncEngine(
               val snap = db.collection("shops").document(remoteShopId)
                 .collection("orders").document(id).get().await()
               if (snap.exists()) {
+                recordSessionReads("orders", 1)
                 snap.toObject(OrderDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                   ?.toLocalEntity(localShopId)
               } else {
@@ -779,6 +781,7 @@ class SyncEngine(
         .get()
         .await()
     }
+    recordSessionReads("order_reservations", remoteResSnap.size())
     val remoteList = remoteResSnap.toObjects(
       OrderReservationDoc::class.java,
       DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
@@ -1518,8 +1521,8 @@ class SyncEngine(
 
   private suspend fun persistCollectionCursor(deviceId: String, collection: String, cursor: Long) {
     database.withTransaction {
-    val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
-    val updated = when (collection) {
+      val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
+      val updated = when (collection) {
       "customers" -> current.copy(customersLastPulledAt = maxOf(current.customersLastPulledAt, cursor))
       "measurements" -> current.copy(measurementsLastPulledAt = maxOf(current.measurementsLastPulledAt, cursor))
       "orders" -> current.copy(ordersLastPulledAt = maxOf(current.ordersLastPulledAt, cursor))
