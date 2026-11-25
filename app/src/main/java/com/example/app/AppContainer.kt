@@ -1,7 +1,6 @@
 package com.example.app
 
 import android.content.Context
-import com.example.core.model.DeviceRegistrationStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -53,7 +52,7 @@ class DefaultAppContainer(
   thermalPrinterClientOverride: ThermalPrinterClient? = null,
   shopPreferencesRepositoryOverride: ShopPreferencesRepository? = null,
   shopCloudRepositoryOverride: ShopCloudRepository? = null,
- ) : AppContainer {
+) : AppContainer {
   override val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   override val database: DarziDatabase by lazy {
     DarziDatabase.getInstance(applicationContext)
