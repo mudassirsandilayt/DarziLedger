@@ -1536,13 +1536,6 @@ class SyncEngine(
     }
   }
 
-  private data class PullSnapshots(
-    val custSnap: com.google.firebase.firestore.QuerySnapshot,
-    val measSnap: com.google.firebase.firestore.QuerySnapshot,
-    val orderSnap: com.google.firebase.firestore.QuerySnapshot,
-    val paySnap: com.google.firebase.firestore.QuerySnapshot,
-    val resSnap: com.google.firebase.firestore.QuerySnapshot,
-  )
 
   private suspend fun updateSyncMetadata(
     deviceId: String,
