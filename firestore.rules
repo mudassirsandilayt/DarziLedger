@@ -256,6 +256,7 @@ service cloud.firestore {
              data.note is string && data.note.size() <= 300 &&
              isValidId(data.deviceId) &&
              data.createdAtEpochMillis is int && data.createdAtEpochMillis >= 0 &&
+             data.updatedAtEpochMillis is int && data.updatedAtEpochMillis >= 0 &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
