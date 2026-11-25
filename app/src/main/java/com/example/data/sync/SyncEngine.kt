@@ -1544,15 +1544,17 @@ class SyncEngine(
     successAt: Long? = null,
     error: String? = null,
   ) {
-    val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
-    deviceSyncDao.upsertSyncMetadata(
-      current.copy(
-        syncStatus = state,
-        lastSyncAttemptAt = attemptAt,
-        lastSuccessfulSyncAt = successAt ?: current.lastSuccessfulSyncAt,
-        lastError = error,
-      ),
-    )
+    database.withTransaction {
+      val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
+      deviceSyncDao.upsertSyncMetadata(
+        current.copy(
+          syncStatus = state,
+          lastSyncAttemptAt = attemptAt,
+          lastSuccessfulSyncAt = successAt ?: current.lastSuccessfulSyncAt,
+          lastError = error,
+        ),
+      )
+    }
   }
 
   private fun dependencyPriority(type: SyncEntityType): Int = when (type) {
