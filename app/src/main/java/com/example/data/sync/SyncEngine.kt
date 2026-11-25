@@ -672,9 +672,7 @@ class SyncEngine(
               .map { it.document }
             if (docs.isNotEmpty()) {
               onDocuments(docs)
-              val count = docs.size
-              _sessionReadCounts.value = _sessionReadCounts.value +
-                (collection to ((_sessionReadCounts.value[collection] ?: 0) + count))
+              recordSessionReads(collection, docs.size)
               persistCollectionCursor(device.deviceId, collection, maxUpdatedAt(docs, savedCursor))
             }
           }
@@ -1463,11 +1461,13 @@ class SyncEngine(
     var totalPulled = 0
     withTimeout(PULL_TIMEOUT_MS) {
       val custSnap = queryCollection("customers", metadata.customersLastPulledAt)
+      recordSessionReads("customers", custSnap.size())
       val customers = custSnap.documents.mapNotNull { it.toObject(CustomerDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity(shopId) }
       totalPulled += remoteApplier.applyRemoteCustomers(customers)
       persistCollectionCursor(device.deviceId, "customers", maxUpdatedAt(custSnap.documents, metadata.customersLastPulledAt))
 
       val measSnap = queryCollection("measurements", metadata.measurementsLastPulledAt)
+      recordSessionReads("measurements", measSnap.size())
       val measurements = measSnap.documents.mapNotNull { it.toObject(MeasurementDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity() }
       totalPulled += remoteApplier.applyRemoteMeasurements(
         remoteList = measurements,
@@ -1476,6 +1476,7 @@ class SyncEngine(
       persistCollectionCursor(device.deviceId, "measurements", maxUpdatedAt(measSnap.documents, metadata.measurementsLastPulledAt))
 
       val orderSnap = queryCollection("orders", metadata.ordersLastPulledAt)
+      recordSessionReads("orders", orderSnap.size())
       val orders = orderSnap.documents.mapNotNull { it.toObject(OrderDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity(shopId) }
       totalPulled += remoteApplier.applyRemoteOrders(
         remoteList = orders,
@@ -1484,6 +1485,7 @@ class SyncEngine(
       persistCollectionCursor(device.deviceId, "orders", maxUpdatedAt(orderSnap.documents, metadata.ordersLastPulledAt))
 
       val paymentSnap = queryCollection("payments", metadata.paymentsLastPulledAt)
+      recordSessionReads("payments", paymentSnap.size())
       val payments = paymentSnap.documents.mapNotNull { it.toObject(PaymentDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity() }
       totalPulled += remoteApplier.applyRemotePayments(
         remoteList = payments,
@@ -1493,6 +1495,7 @@ class SyncEngine(
       persistCollectionCursor(device.deviceId, "payments", maxUpdatedAt(paymentSnap.documents, metadata.paymentsLastPulledAt))
 
       val reservationSnap = queryCollection("order_reservations", metadata.reservationsLastPulledAt, deviceScoped = true)
+      recordSessionReads("order_reservations", reservationSnap.size())
       val reservations = reservationSnap.documents.mapNotNull { it.toObject(OrderReservationDoc::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toLocalEntity() }
       remoteApplier.applyRemoteReservations(reservations)
       persistCollectionCursor(device.deviceId, "order_reservations", maxUpdatedAt(reservationSnap.documents, metadata.reservationsLastPulledAt))
@@ -1502,6 +1505,12 @@ class SyncEngine(
 
   private fun maxUpdatedAt(documents: List<DocumentSnapshot>, fallback: Long): Long =
     documents.mapNotNull { it.getTimestamp("updatedAt")?.toDate()?.time }.maxOrNull() ?: maxOf(fallback, System.currentTimeMillis())
+
+  private fun recordSessionReads(collection: String, count: Int) {
+    if (count <= 0) return
+    _sessionReadCounts.value = _sessionReadCounts.value +
+      (collection to ((_sessionReadCounts.value[collection] ?: 0) + count))
+  }
 
   private suspend fun persistCollectionCursor(deviceId: String, collection: String, cursor: Long) {
     val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
