@@ -338,7 +338,9 @@ object SyncMappers {
     "note" to entity.note.trim().take(300),
     "deviceId" to entity.deviceId,
     "createdAtEpochMillis" to entity.createdAt.coerceAtLeast(0L),
+    "updatedAtEpochMillis" to System.currentTimeMillis(),
     "createdAt" to FieldValue.serverTimestamp(),
+    "updatedAt" to FieldValue.serverTimestamp(),
   )
 
   fun PaymentDoc.toLocalEntity(): PaymentEntity = PaymentEntity(
