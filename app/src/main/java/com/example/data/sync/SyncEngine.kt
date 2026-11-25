@@ -1530,9 +1530,10 @@ class SyncEngine(
       "orders" -> current.copy(ordersLastPulledAt = maxOf(current.ordersLastPulledAt, cursor))
       "payments" -> current.copy(paymentsLastPulledAt = maxOf(current.paymentsLastPulledAt, cursor))
       "order_reservations" -> current.copy(reservationsLastPulledAt = maxOf(current.reservationsLastPulledAt, cursor))
-      else -> current
+        else -> current
+      }
+      deviceSyncDao.upsertSyncMetadata(updated)
     }
-    deviceSyncDao.upsertSyncMetadata(updated)
   }
 
   private data class PullSnapshots(
