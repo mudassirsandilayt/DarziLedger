@@ -1559,6 +1559,7 @@ class SyncEngine(
     const val PULL_TIMEOUT_MS = 120_000L
     const val PARENT_FETCH_TIMEOUT_MS = 15_000L
     const val SNAPSHOT_SYNC_TIMESTAMP_THROTTLE_MS = 15_000L
+    const val SYNC_CURSOR_OVERLAP_MS = 5_000L
     const val OUTBOX_BATCH_FETCH_SIZE = 300
     const val MAX_CONCURRENT_WRITES = 15
   }
