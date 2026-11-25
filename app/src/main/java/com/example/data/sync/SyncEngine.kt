@@ -87,6 +87,7 @@ class SyncEngine(
   private val deviceSyncRepository: DeviceSyncRepository,
   private val shopRepository: ShopRepository,
   private val orderRepository: OrderRepository,
+  private val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
   private val customerDao = database.customerDao()
   private val measurementDao = database.measurementDao()
@@ -95,7 +96,6 @@ class SyncEngine(
   private val outboxDao = database.syncOutboxDao()
   private val orderSyncLogDao = database.orderSyncLogDao()
   private val remoteApplier = SyncRemoteApplier(database)
-  private val fallbackApplicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   private val _sessionReadCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
   val sessionReadCounts: StateFlow<Map<String, Int>> = _sessionReadCounts.asStateFlow()
@@ -120,7 +120,7 @@ class SyncEngine(
   val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
   fun startRealtimeSync(shopId: String) {
-    startRealtimeSync(shopId, fallbackApplicationScope)
+    startRealtimeSync(shopId, applicationScope)
   }
 
   fun startRealtimeSync(shopId: String, scope: CoroutineScope) {
