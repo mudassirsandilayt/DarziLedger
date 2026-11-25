@@ -171,5 +171,7 @@ data class PaymentDoc(
   val note: String = "",
   val deviceId: String = "",
   val createdAtEpochMillis: Long = 0L,
+  val updatedAtEpochMillis: Long = 0L,
   @ServerTimestamp val createdAt: Timestamp? = null,
+  @ServerTimestamp val updatedAt: Timestamp? = null,
 )
