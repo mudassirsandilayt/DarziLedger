@@ -11,4 +11,9 @@ data class SyncMetadataEntity(
   val lastSyncAttemptAt: Long? = null,
   val syncStatus: SyncState = SyncState.IDLE,
   val lastError: String? = null,
+  val customersLastPulledAt: Long = 0L,
+  val measurementsLastPulledAt: Long = 0L,
+  val ordersLastPulledAt: Long = 0L,
+  val paymentsLastPulledAt: Long = 0L,
+  val reservationsLastPulledAt: Long = 0L,
 )
