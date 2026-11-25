@@ -1525,11 +1525,11 @@ class SyncEngine(
     database.withTransaction {
       val current = deviceSyncDao.getSyncMetadata(deviceId) ?: SyncMetadataEntity(deviceId = deviceId)
       val updated = when (collection) {
-      "customers" -> current.copy(customersLastPulledAt = maxOf(current.customersLastPulledAt, cursor))
-      "measurements" -> current.copy(measurementsLastPulledAt = maxOf(current.measurementsLastPulledAt, cursor))
-      "orders" -> current.copy(ordersLastPulledAt = maxOf(current.ordersLastPulledAt, cursor))
-      "payments" -> current.copy(paymentsLastPulledAt = maxOf(current.paymentsLastPulledAt, cursor))
-      "order_reservations" -> current.copy(reservationsLastPulledAt = maxOf(current.reservationsLastPulledAt, cursor))
+        "customers" -> current.copy(customersLastPulledAt = maxOf(current.customersLastPulledAt, cursor))
+        "measurements" -> current.copy(measurementsLastPulledAt = maxOf(current.measurementsLastPulledAt, cursor))
+        "orders" -> current.copy(ordersLastPulledAt = maxOf(current.ordersLastPulledAt, cursor))
+        "payments" -> current.copy(paymentsLastPulledAt = maxOf(current.paymentsLastPulledAt, cursor))
+        "order_reservations" -> current.copy(reservationsLastPulledAt = maxOf(current.reservationsLastPulledAt, cursor))
         else -> current
       }
       deviceSyncDao.upsertSyncMetadata(updated)
